@@ -63,11 +63,6 @@ resource "helm_release" "clickstack" {
 
   values = [local.clickstack_values]
 
-  set = [
-    # The collector reads clickstack-config through envFrom, which does not restart it when the values change
-    { name = "otel-collector.podAnnotations.checksum/values", value = sha256(local.clickstack_values) },
-  ]
-
   set_sensitive = [
     { name = "hyperdx.secrets.CLICKHOUSE_PASSWORD", value = random_password.clickstack["clickhouse"].result },
     { name = "hyperdx.secrets.CLICKHOUSE_APP_PASSWORD", value = random_password.clickstack["clickhouse_app"].result },

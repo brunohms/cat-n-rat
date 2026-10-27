@@ -18,11 +18,6 @@ terraform {
 }
 
 provider "helm" {
-  # Diffs the rendered manifests, so a change in the templates of a local chart is applied without a version bump
-  experiments = {
-    manifest = true
-  }
-
   kubernetes = {
     host                   = kind_cluster.this.endpoint
     client_certificate     = kind_cluster.this.client_certificate
