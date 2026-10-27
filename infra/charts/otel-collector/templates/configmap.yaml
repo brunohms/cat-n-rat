@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      file_storage:
+        directory: /var/lib/otelcol/file_storage
+        create_directory: true
+
+    receivers:
+      # Traces and metrics pushed by the backend and the generator
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      # stdout/stderr of every pod on the node, except the collector itself (it would log its own exports)
+      file_log:
+        include: [/var/log/pods/*/*/*.log]
+        exclude: [/var/log/pods/{{ .Release.Namespace }}_{{ .Release.Name }}-*/*/*.log]
+        start_at: beginning
+        include_file_path: true
+        include_file_name: false
+        storage: file_storage
+        operators:
+          # Parses the CRI log format and sets the namespace, pod and container from the file path
+          - type: container
+            id: container
+          # Severity of "level=INFO" (Go slog and other logfmt loggers) and "2026-01-01 12:00:00,000 INFO" (Python
+          # logging). The ClickStack collector guesses the severity of the other lines, but it would read the
+          # backend's "trace_id=" as the TRACE level
+          - type: regex_parser
+            id: severity
+            if: 'body matches "level=" or body matches "^[0-9]{4}-[0-9]{2}-[0-9]{2} "'
+            regex: '(?i)(?:\blevel=|^\d{4}-\d{2}-\d{2} [\d:,.]+ )(?P<log_level>trace|debug|info|warn|warning|error|fatal|critical)\b'
+            on_error: send_quiet
+            severity:
+              parse_from: attributes.log_level
+              mapping:
+                warn: [warn, warning]
+                fatal: [fatal, critical]
+          # The backend writes trace_id and span_id in its request logs, linking each log line to its trace
+          - type: regex_parser
+            id: trace
+            if: 'body matches "trace_id=[0-9a-f]{32}"'
+            regex: 'trace_id=(?P<trace_id>[0-9a-f]{32}) span_id=(?P<span_id>[0-9a-f]{16})'
+            # Lines without a trace (most of them) are kept as they are
+            on_error: send_quiet
+            trace:
+              trace_id:
+                parse_from: attributes.trace_id
+              span_id:
+                parse_from: attributes.span_id
+
+      kubelet_stats:
+        collection_interval: {{ .Values.kubeletInterval }}
+        auth_type: serviceAccount
+        endpoint: https://${env:K8S_NODE_IP}:10250
+        # kind's kubelet serves a self-signed certificate
+        insecure_skip_verify: true
+        metric_groups: [node, pod, container]
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+      k8s_attributes:
+        auth_type: serviceAccount
+        filter:
+          node_from_env_var: K8S_NODE_NAME
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.node.name
+            - k8s.deployment.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.ip
+          # OTLP data from the apps is matched by the IP of the pod that sent it
+          - sources:
+              - from: connection
+      # Pod logs have no service.name; the container name lets HyperDX group them with the traces of the same service
+      transform/service-name:
+        error_mode: ignore
+        log_statements:
+          - context: resource
+            statements:
+              - set(attributes["service.name"], attributes["k8s.container.name"]) where attributes["service.name"] == nil
+      batch:
+        timeout: 5s
+
+    exporters:
+      # Severity and JSON log parsing and the ClickHouse schema are handled by the ClickStack collector
+      otlp_http/clickstack:
+        endpoint: {{ .Values.clickstack.endpoint }}
+        headers:
+          authorization: ${env:OTLP_AUTH_TOKEN}
+        sending_queue:
+          enabled: true
+        retry_on_failure:
+          enabled: true
+
+    service:
+      extensions: [health_check, file_storage]
+      pipelines:
+        logs:
+          receivers: [file_log, otlp]
+          processors: [memory_limiter, k8s_attributes, transform/service-name, batch]
+          exporters: [otlp_http/clickstack]
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8s_attributes, batch]
+          exporters: [otlp_http/clickstack]
+        metrics:
+          receivers: [otlp, kubelet_stats]
+          processors: [memory_limiter, k8s_attributes, batch]
+          exporters: [otlp_http/clickstack]

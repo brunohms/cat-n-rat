@@ -1,0 +1,6 @@
+apiVersion: v2
+name: otel-collector
+description: OpenTelemetry Collector agent that gathers pod logs, kubelet metrics and OTLP data and forwards them to ClickStack
+type: application
+version: 0.1.0
+appVersion: "0.164.0"

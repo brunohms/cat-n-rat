@@ -1,0 +1,21 @@
+image:
+  repository: postgres
+  tag: "14"
+  pullPolicy: IfNotPresent
+
+database: catnrat
+user: catnrat
+# Required: pass it with --set password=... (Terraform generates a random one)
+password: ""
+
+storage:
+  size: 1Gi
+  # Empty uses the cluster default StorageClass (kind ships with "standard")
+  storageClassName: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi

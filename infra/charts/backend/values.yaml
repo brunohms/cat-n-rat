@@ -1,0 +1,56 @@
+replicaCount: 1
+
+image:
+  repository: catnrat-backend
+  tag: latest
+  # Images are loaded straight into the kind nodes, so they are never pulled from a registry
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+  # Only used when service.type is NodePort
+  nodePort: null
+
+# Base URL of the generator service inside the cluster
+generatorUrl: http://generator:8000
+generatorTimeout: "30"
+maxBatch: "10000"
+# Applies pending migrations when the pod starts (golang-migrate locks the database, so replicas do not race)
+runMigrations: true
+
+# OpenTelemetry traces and metrics; disabled while endpoint is empty
+otel:
+  # OTLP/HTTP endpoint of the collector, e.g. http://otel-collector:4318
+  endpoint: ""
+  serviceName: backend
+
+database:
+  host: postgres
+  port: 5432
+  name: catnrat
+  user: catnrat
+  sslMode: disable
+  # Secret that holds the database password
+  passwordSecret:
+    name: postgres
+    key: password
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # "nonroot" user of the distroless base image
+  runAsUser: 65532
+  runAsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

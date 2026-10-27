@@ -1,0 +1,87 @@
+# Values of the ClickStack chart (https://github.com/ClickHouse/ClickStack-helm-charts), sized for a local kind
+# cluster. The passwords and the OTLP token are passed by releases.tf with set_sensitive.
+
+hyperdx:
+  config:
+    # URL of the HyperDX UI on the host (NodePort below)
+    FRONTEND_URL: "http://localhost:${hyperdx_node_port}"
+    USAGE_STATS_ENABLED: "false"
+    # How long ClickHouse keeps the logs, metrics and traces
+    HYPERDX_OTEL_EXPORTER_TABLES_TTL: "${telemetry_ttl}"
+    # Empty runs the ClickStack collector in standalone mode: its config is not pushed by HyperDX over OpAMP,
+    # so it does not need the ingestion key that only exists after the first sign-up in the UI. OTLP requests
+    # are authenticated with the OTLP_AUTH_TOKEN of clickstack-secret instead.
+    OPAMP_SERVER_URL: ""
+    # In standalone mode a non-empty value also remote-writes every metric to ClickHouse's Prometheus endpoint,
+    # which this ClickHouse does not serve (PromQL support is not enabled); the metrics tables are unaffected
+    CLICKHOUSE_PROMETHEUS_METRICS_ENDPOINT: ""
+
+  deployment:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+
+clickhouse:
+  keeper:
+    spec:
+      replicas: 1
+      dataVolumeClaimSpec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+  cluster:
+    spec:
+      containerTemplate:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 1Gi
+          limits:
+            # ClickHouse caps its own memory usage at 90% of this limit
+            memory: 2Gi
+      dataVolumeClaimSpec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 5Gi
+
+global:
+  otelCollector:
+    # Merged on top of the built-in config. Its JSON log parsing logs a warning for every line that is not JSON,
+    # and those warnings would be collected back as pod logs
+    customConfig: |
+      service:
+        telemetry:
+          logs:
+            level: error
+
+otel-collector:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      # Above the 1500 MiB memory_limiter built into the ClickStack collector config
+      memory: 2Gi
+
+# The chart only creates a ClusterIP Service for HyperDX; this one exposes the UI on the host through kind
+additionalManifests:
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: hyperdx-nodeport
+    spec:
+      type: NodePort
+      selector:
+        app.kubernetes.io/name: clickstack
+        app.kubernetes.io/instance: "{{ .Release.Name }}"
+        app: "{{ include \"clickstack.fullname\" . }}"
+      ports:
+        - name: app
+          port: 3000
+          targetPort: 3000
+          nodePort: ${hyperdx_node_port}

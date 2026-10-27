@@ -11,6 +11,8 @@
   <img src="https://img.shields.io/badge/Go-00ADD8?logo=go&logoColor=white">
   <img src="https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white">
   <img src="https://img.shields.io/badge/React-20232A?logo=react&logoColor=61DAFB">
+  <img src="https://img.shields.io/badge/ClickHouse-FFCC01?logo=clickhouse&logoColor=black">
+  <img src="https://img.shields.io/badge/OpenTelemetry-425CC7?logo=opentelemetry&logoColor=white">
 </p>
 
 ---
@@ -20,7 +22,7 @@
 | [`generator/`](generator/README.md) | Python service that generates random purchase events |
 | [`app/backend/`](app/backend/README.md) | Go backend that receives, requests and stores the events in PostgreSQL 14 |
 | [`app/frontend/`](app/frontend/README.md) | React frontend with filterable tables of the backend data |
-| [`infra/`](infra/README.md) | Terraform + Helm: kind Kubernetes cluster running everything |
+| [`infra/`](infra/README.md) | Terraform + Helm: kind Kubernetes cluster running everything, monitored with OpenTelemetry and ClickStack |
 
 ## Getting started
 
@@ -41,14 +43,18 @@ mise run dev        # create the kind cluster and deploy everything with Terrafo
 | Backend | `http://localhost:30001` | `http://localhost:8001` |
 | Generator | `http://localhost:30000` (API docs at `/docs`) | `http://localhost:8000` (API docs at `/docs`) |
 | PostgreSQL 14 | Only inside the cluster | `localhost:5432` (user, password and database: `catnrat`) |
+| HyperDX (ClickStack) | `http://localhost:30030` (create an account on the first visit) | — |
 
 There are two ways to run the project:
 
 - `mise run dev`: runs `infra:up`, which creates a [kind](https://kind.sigs.k8s.io) cluster with Terraform and
-  deploys PostgreSQL, the backend, the generator and the frontend with Helm (see [`infra/`](infra/README.md)).
+  deploys PostgreSQL, the backend, the generator and the frontend with Helm (see [`infra/`](infra/README.md)),
+  plus [ClickStack](https://clickhouse.com/docs/use-cases/observability/clickstack): logs, metrics and traces
+  are collected with OpenTelemetry, stored in ClickHouse and explored in HyperDX (see [Monitoring](infra/README.md#monitoring)).
   After a code change, run it again to rebuild the changed images and roll the pods.
 - `mise run dev:local`: runs the backend, the generator and the frontend straight from the source code, with
-  only PostgreSQL in Docker. Faster to start, and the frontend reloads on every change.
+  only PostgreSQL in Docker. Faster to start, and the frontend reloads on every change. Telemetry is off here,
+  unless `OTEL_EXPORTER_OTLP_ENDPOINT` points to an OpenTelemetry Collector.
 
 In both, the generator pushes one event per second to the backend. The local ports can be changed with
 environment variables, e.g. `BACKEND_PORT=9001 GENERATOR_PORT=9000 FRONTEND_PORT=9002 mise run dev:local`.
@@ -78,5 +84,6 @@ Run `mise tasks` to see them all.
 | `infra:plan` | Show what Terraform would change |
 | `infra:status` | Show the pods and services of the cluster |
 | `infra:lint` | Check the Terraform code and lint the Helm charts |
+| `monitoring:clickhouse ["SQL"]` | Open `clickhouse-client` in the ClickStack ClickHouse, or run a query |
 
 To run everything in a local Kubernetes cluster instead, use `mise run infra:up` (see [`infra/`](infra/README.md)).

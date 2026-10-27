@@ -1,0 +1,44 @@
+replicaCount: 1
+
+image:
+  repository: purchase-generator
+  tag: latest
+  # Images are loaded straight into the kind nodes, so they are never pulled from a registry
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+  # Only used when service.type is NodePort
+  nodePort: null
+
+# Environment variables of the generator (see generator/README.md)
+config:
+  SINK: http
+  HTTP_TARGET_URL: http://backend:8000/events
+  EVENTS_PER_SECOND: "1"
+  FAKER_LOCALE: pt_BR
+  MAX_BATCH: "10000"
+  # OpenTelemetry traces and metrics; set OTEL_EXPORTER_OTLP_ENDPOINT (e.g. http://otel-collector:4318) to enable them
+  OTEL_SERVICE_NAME: generator
+  # Counters are exported as deltas, so a sum over a time range in ClickHouse is the number of events
+  OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: delta
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # "appuser" created in the generator Dockerfile
+  runAsUser: 1000
+  runAsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

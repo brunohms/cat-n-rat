@@ -1,0 +1,234 @@
+[tools]
+go = "1.27"
+python = "3.12"
+terraform = "1.17.0"
+kind = "0.33.0"
+helm = "4.3.1"
+kubectl = "1.37.1"
+node = "24"
+
+[env]
+# Virtualenv for the generator, created and activated automatically inside the project
+_.python.venv = { path = "generator/.venv", create = true }
+
+POSTGRES_CONTAINER = "catnrat-db"
+POSTGRES_USER = "catnrat"
+POSTGRES_PASSWORD = "catnrat"
+POSTGRES_DB = "catnrat"
+DATABASE_URL = "postgres://catnrat:catnrat@localhost:5432/catnrat?sslmode=disable"
+
+# Local ports; override them (e.g. BACKEND_PORT=9001 mise run dev:local) if they are already in use
+BACKEND_PORT = "{{ get_env(name='BACKEND_PORT', default='8001') }}"
+GENERATOR_PORT = "{{ get_env(name='GENERATOR_PORT', default='8000') }}"
+FRONTEND_PORT = "{{ get_env(name='FRONTEND_PORT', default='5173') }}"
+
+[tasks.install]
+description = "Install the dependencies of the generator, the backend and the frontend"
+depends = ["generator:install", "backend:install", "frontend:install"]
+
+[tasks.dev]
+description = "Create the kind cluster with Terraform and deploy everything (frontend on localhost:30080, HyperDX on localhost:30030)"
+depends = ["infra:up"]
+run = "kubectl --context kind-catnrat -n catnrat get pods,svc"
+
+[tasks."dev:local"]
+description = "Run the backend, the generator and the frontend from source (database in Docker)"
+depends = ["db:start"]
+run = "mise run backend:dev ::: generator:dev ::: frontend:dev"
+
+[tasks.test]
+description = "Run all tests"
+depends = ["generator:test", "backend:test", "frontend:test"]
+
+# --- Database (PostgreSQL 14 in Docker) ---
+
+[tasks."db:start"]
+description = "Start PostgreSQL 14 in Docker and wait until it accepts connections"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+if docker container inspect "$POSTGRES_CONTAINER" >/dev/null 2>&1; then
+  docker start "$POSTGRES_CONTAINER" >/dev/null
+else
+  docker run -d --name "$POSTGRES_CONTAINER" \
+    -e POSTGRES_USER -e POSTGRES_PASSWORD -e POSTGRES_DB \
+    -p 5432:5432 -v catnrat-db-data:/var/lib/postgresql/data \
+    postgres:14 >/dev/null
+fi
+until docker exec "$POSTGRES_CONTAINER" pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; do
+  sleep 1
+done
+echo "PostgreSQL 14 is ready on localhost:5432"
+"""
+
+[tasks."db:stop"]
+description = "Stop the database container (data is kept)"
+run = "docker stop $POSTGRES_CONTAINER"
+
+[tasks."db:reset"]
+description = "Delete the database container and its data"
+run = "docker rm -f $POSTGRES_CONTAINER && docker volume rm catnrat-db-data"
+
+[tasks."db:psql"]
+description = "Open psql in the database"
+run = "docker exec -it $POSTGRES_CONTAINER psql -U $POSTGRES_USER -d $POSTGRES_DB"
+
+[tasks."db:migrate"]
+description = "Apply all pending migrations"
+depends = ["db:start"]
+dir = "{{config_root}}/app/backend"
+run = "go run ./cmd/server migrate up"
+
+[tasks."db:rollback"]
+description = "Revert the last N migrations (default 1): mise run db:rollback [N]"
+depends = ["db:start"]
+dir = "{{config_root}}/app/backend"
+run = "go run ./cmd/server migrate down {{arg(name='steps', default='1')}}"
+
+[tasks."db:version"]
+description = "Print the current schema version"
+depends = ["db:start"]
+dir = "{{config_root}}/app/backend"
+run = "go run ./cmd/server migrate version"
+
+# --- Backend (Go) ---
+
+[tasks."backend:install"]
+description = "Download the Go modules"
+dir = "{{config_root}}/app/backend"
+run = "go mod download"
+
+[tasks."backend:dev"]
+description = "Run the backend on localhost:$BACKEND_PORT (applies pending migrations on start)"
+depends = ["db:start"]
+dir = "{{config_root}}/app/backend"
+run = "PORT=$BACKEND_PORT GENERATOR_URL=http://localhost:$GENERATOR_PORT go run ./cmd/server"
+
+[tasks."backend:lint"]
+description = "Check formatting and run go vet"
+dir = "{{config_root}}/app/backend"
+run = ['test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }', "go vet ./..."]
+
+[tasks."backend:test"]
+description = "Run the backend tests"
+dir = "{{config_root}}/app/backend"
+run = "go test ./..."
+
+[tasks."backend:build"]
+description = "Build the backend binary into app/backend/bin/server"
+dir = "{{config_root}}/app/backend"
+run = "CGO_ENABLED=0 go build -trimpath -o bin/server ./cmd/server"
+
+[tasks."backend:image"]
+description = "Build the backend Docker image"
+run = "docker build -t catnrat-backend app/backend"
+
+# --- Frontend (React) ---
+
+[tasks."frontend:install"]
+description = "Install the frontend dependencies"
+dir = "{{config_root}}/app/frontend"
+run = "npm ci --no-audit --no-fund"
+
+[tasks."frontend:dev"]
+description = "Run the frontend on localhost:$FRONTEND_PORT, proxying /api to the backend"
+dir = "{{config_root}}/app/frontend"
+run = "npm run dev"
+
+[tasks."frontend:lint"]
+description = "Type-check the frontend"
+dir = "{{config_root}}/app/frontend"
+run = "npm run typecheck"
+
+[tasks."frontend:test"]
+description = "Run the frontend tests"
+dir = "{{config_root}}/app/frontend"
+run = "npm test"
+
+[tasks."frontend:build"]
+description = "Build the frontend into app/frontend/dist"
+dir = "{{config_root}}/app/frontend"
+run = "npm run build"
+
+[tasks."frontend:image"]
+description = "Build the frontend Docker image"
+run = "docker build -t catnrat-frontend app/frontend"
+
+# --- Generator (Python) ---
+
+[tasks."generator:install"]
+description = "Install the generator dependencies into generator/.venv"
+dir = "{{config_root}}/generator"
+run = "pip install -q -r requirements-dev.txt"
+
+[tasks."generator:dev"]
+description = "Run the generator on localhost:$GENERATOR_PORT, pushing events to the backend"
+dir = "{{config_root}}/generator"
+env = { SINK = "http", EVENTS_PER_SECOND = "1" }
+run = "HTTP_TARGET_URL=http://localhost:$BACKEND_PORT/events uvicorn app.main:app --host 0.0.0.0 --port $GENERATOR_PORT"
+
+[tasks."generator:test"]
+description = "Run the generator tests"
+dir = "{{config_root}}/generator"
+run = "pytest"
+
+[tasks."generator:image"]
+description = "Build the generator Docker image"
+run = "docker build -t purchase-generator generator"
+
+# --- Infra (kind cluster + Helm releases, managed by Terraform) ---
+
+[tasks."infra:init"]
+description = "Initialize Terraform (download the providers)"
+dir = "{{config_root}}/infra/terraform"
+run = "terraform init -input=false"
+
+[tasks."infra:plan"]
+description = "Show what Terraform would change"
+depends = ["infra:init"]
+dir = "{{config_root}}/infra/terraform"
+run = "terraform plan"
+
+[tasks."infra:up"]
+description = "Create the kind cluster, build and load the images, and deploy the app and the monitoring stack with Helm"
+depends = ["infra:init"]
+dir = "{{config_root}}/infra/terraform"
+run = "terraform apply -auto-approve"
+
+[tasks."infra:down"]
+description = "Destroy the kind cluster and everything in it"
+depends = ["infra:init"]
+dir = "{{config_root}}/infra/terraform"
+run = "terraform destroy -auto-approve"
+
+[tasks."infra:status"]
+description = "Show the pods and services of the cluster"
+run = "kubectl --context kind-catnrat -n catnrat get pods,svc"
+
+[tasks."infra:lint"]
+description = "Check the Terraform code and lint the Helm charts"
+depends = ["infra:init"]
+dir = "{{config_root}}/infra"
+run = [
+  "terraform -chdir=terraform fmt -check -recursive",
+  "terraform -chdir=terraform validate",
+  "helm lint charts/backend charts/generator charts/frontend charts/otel-collector",
+  "helm lint charts/postgres --set password=lint",
+]
+
+# --- Monitoring (ClickStack: ClickHouse + HyperDX + OpenTelemetry Collector, in the kind cluster) ---
+
+[tasks."monitoring:clickhouse"]
+description = "Open clickhouse-client in the ClickStack ClickHouse (or run a query: mise run monitoring:clickhouse \"SELECT ...\")"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+kube="kubectl --context kind-catnrat -n catnrat"
+pod=$($kube get pods -l app.kubernetes.io/name=clickhouse-server -o jsonpath='{.items[0].metadata.name}')
+password=$($kube get secret clickstack-secret -o jsonpath='{.data.CLICKHOUSE_PASSWORD}' | base64 -d)
+if [ $# -gt 0 ]; then
+  $kube exec "$pod" -c clickhouse-server -- clickhouse-client --user otelcollector --password "$password" -q "$*"
+else
+  $kube exec -it "$pod" -c clickhouse-server -- clickhouse-client --user otelcollector --password "$password"
+fi
+"""

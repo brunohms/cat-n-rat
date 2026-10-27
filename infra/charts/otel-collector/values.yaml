@@ -1,0 +1,34 @@
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.164.0"
+  pullPolicy: IfNotPresent
+
+# ClickStack collector that receives everything over OTLP/HTTP and writes it to ClickHouse
+clickstack:
+  endpoint: http://clickstack-otel-collector:4318
+  # Secret that holds the OTLP bearer token accepted by the ClickStack collector
+  tokenSecret:
+    name: clickstack-secret
+    key: OTLP_AUTH_TOKEN
+
+# How often the kubelet is asked for node, pod and container CPU, memory, network and filesystem usage
+kubeletInterval: 30s
+
+# Pod logs are read from the node; the checkpoint of each file is kept here, so a restart does not duplicate logs
+storagePath: /var/lib/otelcol
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+securityContext:
+  # Pod log files on the node are owned by root and not world-readable
+  runAsUser: 0
+  runAsGroup: 0
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

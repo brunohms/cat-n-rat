@@ -1,0 +1,35 @@
+replicaCount: 1
+
+image:
+  repository: catnrat-frontend
+  tag: latest
+  # Images are loaded straight into the kind nodes, so they are never pulled from a registry
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+  # Only used when service.type is NodePort
+  nodePort: null
+
+# Backend that receives the /api requests
+backendUrl: http://backend:8000
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    memory: 64Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # "nginx" user of the nginx-unprivileged base image
+  runAsUser: 101
+  runAsGroup: 101
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
