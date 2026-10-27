@@ -86,6 +86,17 @@ resource "helm_release" "otel_collector" {
 
 # --- Application ---
 
+# --- Messaging: the backend publishes every new purchase to Kafka; the worker updates customer_stats ---
+
+resource "helm_release" "kafka" {
+  name             = "kafka"
+  chart            = "${local.charts_dir}/kafka"
+  namespace        = var.namespace
+  create_namespace = true
+  # Also waits for the post-install Job that creates the topics
+  wait = true
+}
+
 resource "helm_release" "backend" {
   name      = "backend"
   chart     = "${local.charts_dir}/backend"
@@ -99,10 +110,29 @@ resource "helm_release" "backend" {
     { name = "database.host", value = helm_release.postgres.name },
     { name = "database.passwordSecret.name", value = helm_release.postgres.name },
     { name = "generatorUrl", value = "http://generator:8000" },
+    { name = "kafka.brokers", value = "${helm_release.kafka.name}:9092" },
     { name = "otel.endpoint", value = local.otlp_endpoint },
   ]
 
   depends_on = [terraform_data.image]
+}
+
+resource "helm_release" "worker" {
+  name      = "worker"
+  chart     = "${local.charts_dir}/worker"
+  namespace = var.namespace
+  wait      = true
+
+  set = [
+    { name = "image.tag", value = local.image_tags.worker },
+    { name = "kafka.brokers", value = "${helm_release.kafka.name}:9092" },
+    { name = "database.host", value = helm_release.postgres.name },
+    { name = "database.passwordSecret.name", value = helm_release.postgres.name },
+    { name = "otel.endpoint", value = local.otlp_endpoint },
+  ]
+
+  # The backend applies the migrations that create customer_stats on start
+  depends_on = [terraform_data.image, helm_release.backend]
 }
 
 resource "helm_release" "generator" {

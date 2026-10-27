@@ -1,0 +1,44 @@
+{{- if .Values.topics }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-topics
+  labels:
+    {{- include "kafka.labels" . | nindent 4 }}
+  annotations:
+    # Runs after the broker is installed or upgraded; the previous Job is deleted first, and this one once it succeeds
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "kafka.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: topics
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: topics
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xmx128m"
+          command:
+            - sh
+            - -ec
+            - |
+              {{- range .Values.topics }}
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server {{ $.Release.Name }}:9092 --create --if-not-exists \
+                --topic {{ .name }} --partitions {{ .partitions }} --replication-factor 1
+              {{- end }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+{{- end }}

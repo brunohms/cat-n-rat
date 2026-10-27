@@ -10,6 +10,8 @@ import (
 )
 
 // CustomerSummary is a customer with aggregates of their purchases.
+// The aggregates come from customer_stats, which the worker updates from Kafka, so they can lag a little behind
+// the purchases just stored.
 type CustomerSummary struct {
 	Customer
 	PurchaseCount int `json:"purchase_count"`
@@ -36,12 +38,10 @@ var CustomerSortFields = map[string]string{
 	"name":             "c.name",
 	"customer_id":      "c.customer_id",
 	"state":            "c.state",
-	"purchase_count":   "count(p.event_id)",
-	"total_spent":      totalSpentExpr,
-	"last_purchase_at": "max(p.event_timestamp)",
+	"purchase_count":   "coalesce(s.purchase_count, 0)",
+	"total_spent":      "coalesce(s.total_spent, 0)",
+	"last_purchase_at": "s.last_purchase_at",
 }
-
-const totalSpentExpr = "coalesce(sum(p.total) FILTER (WHERE p.status = 'paid'), 0)"
 
 // ListCustomers returns one page of the customers that match the filter.
 func (s *Store) ListCustomers(ctx context.Context, f CustomerFilter) (Page[CustomerSummary], error) {
@@ -64,11 +64,10 @@ func (s *Store) ListCustomers(ctx context.Context, f CustomerFilter) (Page[Custo
 	args := append(where.args, f.Limit, f.Offset)
 	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
 		SELECT c.customer_id, c.name, c.email, c.city, c.state,
-			count(p.event_id), `+totalSpentExpr+`::text, max(p.event_timestamp)
+			coalesce(s.purchase_count, 0), coalesce(s.total_spent, 0)::text, s.last_purchase_at
 		FROM customers c
-		LEFT JOIN purchases p ON p.customer_id = c.customer_id
+		LEFT JOIN customer_stats s ON s.customer_id = c.customer_id
 		%s
-		GROUP BY c.customer_id
 		ORDER BY %s %s NULLS LAST, c.customer_id %s
 		LIMIT $%d OFFSET $%d`,
 		where.sql(), sortExpr, direction, direction, len(args)-1, len(args)),

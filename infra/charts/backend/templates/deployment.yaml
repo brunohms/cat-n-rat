@@ -44,6 +44,10 @@ spec:
               value: {{ .Values.maxBatch | quote }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.runMigrations | quote }}
+            - name: KAFKA_BROKERS
+              value: {{ .Values.kafka.brokers | quote }}
+            - name: KAFKA_TOPIC
+              value: {{ .Values.kafka.topic | quote }}
             {{- with .Values.otel.endpoint }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ . | quote }}

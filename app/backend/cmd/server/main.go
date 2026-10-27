@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/brunohms/cat-n-rat/app/backend/internal/config"
 	"github.com/brunohms/cat-n-rat/app/backend/internal/database"
 	"github.com/brunohms/cat-n-rat/app/backend/internal/generator"
+	"github.com/brunohms/cat-n-rat/app/backend/internal/outbox"
 	"github.com/brunohms/cat-n-rat/app/backend/internal/purchase"
 	"github.com/brunohms/cat-n-rat/app/backend/internal/telemetry"
 )
@@ -120,9 +122,27 @@ func runMigrate(logger *slog.Logger, pool *pgxpool.Pool, args []string) error {
 }
 
 func serve(ctx context.Context, logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) error {
+	kafka, err := outbox.NewClient(cfg.KafkaBrokers)
+	if err != nil {
+		return err
+	}
+	defer kafka.Close()
+
+	// The relay runs next to the API; the API does not depend on Kafka being up, the messages wait in the outbox
+	relayCtx, stopRelay := context.WithCancel(ctx)
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		outbox.NewRelay(pool, kafka, logger).Run(relayCtx)
+	}()
+	defer func() {
+		stopRelay()
+		<-relayDone
+	}()
+
 	server := api.NewServer(
 		pool,
-		purchase.NewStore(pool),
+		purchase.NewStore(pool, cfg.KafkaTopic),
 		generator.NewClient(cfg.GeneratorURL, cfg.GeneratorTimeout),
 		cfg.MaxBatch,
 		logger,
@@ -135,7 +155,8 @@ func serve(ctx context.Context, logger *slog.Logger, cfg config.Config, pool *pg
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("server started", "port", cfg.Port, "generator_url", cfg.GeneratorURL)
+		logger.Info("server started", "port", cfg.Port, "generator_url", cfg.GeneratorURL,
+			"kafka_brokers", strings.Join(cfg.KafkaBrokers, ","), "kafka_topic", cfg.KafkaTopic)
 		errCh <- httpServer.ListenAndServe()
 	}()
 

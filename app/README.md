@@ -2,7 +2,8 @@
 
 | Folder | Description |
 |---|---|
-| [`backend/`](backend/README.md) | Go API that receives, requests and stores the purchase events in PostgreSQL 14 |
+| [`backend/`](backend/README.md) | Go API that receives, requests and stores the purchase events in PostgreSQL 14, and publishes each new purchase to Kafka |
+| [`worker/`](worker/README.md) | Go service that consumes the purchases from Kafka and updates the customer stats in PostgreSQL |
 | [`frontend/`](frontend/README.md) | React UI with filterable tables of the backend data |
 
 ```bash

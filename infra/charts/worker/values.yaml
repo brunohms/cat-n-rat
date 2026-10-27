@@ -1,0 +1,51 @@
+# Replicas share the partitions of the topic, so more replicas than partitions stay idle
+replicaCount: 1
+
+image:
+  repository: catnrat-worker
+  tag: latest
+  # Images are loaded straight into the kind nodes, so they are never pulled from a registry
+  pullPolicy: IfNotPresent
+
+kafka:
+  brokers: kafka:9092
+  topic: purchases.stored
+  # Consumer group; its committed offsets say where the worker resumes after a restart
+  group: customer-stats
+
+# The schema is created by the backend migrations, so the backend must be deployed first
+database:
+  host: postgres
+  port: 5432
+  name: catnrat
+  user: catnrat
+  sslMode: disable
+  # Secret that holds the database password
+  passwordSecret:
+    name: postgres
+    key: password
+
+# OpenTelemetry traces and metrics; disabled while endpoint is empty
+otel:
+  # OTLP/HTTP endpoint of the collector, e.g. http://otel-collector:4318
+  endpoint: ""
+  serviceName: worker
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # "nonroot" user of the distroless base image
+  runAsUser: 65532
+  runAsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

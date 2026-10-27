@@ -17,6 +17,11 @@ locals {
         ["Dockerfile", "index.html", "nginx.conf.template", "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts"],
       )
     }
+    worker = {
+      repository = "catnrat-worker"
+      context    = "${local.repo_root}/app/worker"
+      files      = setsubtract(fileset("${local.repo_root}/app/worker", "**"), fileset("${local.repo_root}/app/worker", "bin/**"))
+    }
     generator = {
       repository = "purchase-generator"
       context    = "${local.repo_root}/generator"

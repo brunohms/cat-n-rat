@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,10 @@ type Config struct {
 	RunMigrations bool
 	// HTTP port
 	Port string
+	// Kafka bootstrap brokers
+	KafkaBrokers []string
+	// Topic of the messages published for every new purchase
+	KafkaTopic string
 }
 
 func Load() (Config, error) {
@@ -44,6 +49,8 @@ func Load() (Config, error) {
 		MaxBatch:         maxBatch,
 		RunMigrations:    runMigrations,
 		Port:             getenv("PORT", "8000"),
+		KafkaBrokers:     strings.Split(getenv("KAFKA_BROKERS", "localhost:9092"), ","),
+		KafkaTopic:       getenv("KAFKA_TOPIC", "purchases.stored"),
 	}, nil
 }
 

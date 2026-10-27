@@ -3,5 +3,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 app/backend/bin/
+app/worker/bin/
 node_modules/
 app/frontend/dist/

@@ -1,7 +1,8 @@
 # infra
 
 Local Kubernetes environment: [Terraform](https://www.terraform.io) creates a [kind](https://kind.sigs.k8s.io)
-cluster and deploys PostgreSQL 14, the backend, the generator and the frontend with [Helm](https://helm.sh),
+cluster and deploys PostgreSQL 14, Kafka, the backend, the worker, the generator and the frontend with
+[Helm](https://helm.sh),
 along with [ClickStack](https://clickhouse.com/docs/use-cases/observability/clickstack) (ClickHouse, HyperDX and the
 OpenTelemetry Collector) for logs, metrics and traces (see [Monitoring](#monitoring)).
 Docker is the only requirement besides the tools installed by mise (terraform, kind, helm and kubectl).
@@ -27,10 +28,15 @@ Use `mise run infra:plan` to review the changes first.
 | Generator | `http://localhost:30000` |
 | HyperDX (ClickStack) | `http://localhost:30030` (create an account on the first visit) |
 
-The generator pushes one event per second to the backend. PostgreSQL is only reachable inside the cluster:
+The generator pushes one event per second to the backend, which publishes every new purchase to the
+`purchases.stored` Kafka topic; the worker consumes it and updates `customer_stats`. PostgreSQL and Kafka are
+only reachable inside the cluster:
 
 ```bash
 kubectl --context kind-catnrat -n catnrat exec -it postgres-0 -- psql -U catnrat -d catnrat
+mise run infra:kafka-consume    # print the messages of purchases.stored
+kubectl --context kind-catnrat -n catnrat exec kafka-0 -- /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --group customer-stats --describe    # offsets and lag of the worker
 ```
 
 ## What Terraform does
@@ -38,8 +44,8 @@ kubectl --context kind-catnrat -n catnrat exec -it postgres-0 -- psql -U catnrat
 | File | Description |
 |---|---|
 | `terraform/cluster.tf` | kind cluster `catnrat` with one node; the frontend, backend, generator and HyperDX NodePorts are mapped to `localhost` |
-| `terraform/images.tf` | Builds the `backend`, `frontend` and `generator` Docker images and loads them into the cluster with `kind load` |
-| `terraform/releases.tf` | Installs the `clickstack-operators` and `clickstack` charts (from the ClickStack repository) and the local `otel-collector`, `postgres`, `backend`, `generator` and `frontend` charts in the `catnrat` namespace |
+| `terraform/images.tf` | Builds the `backend`, `worker`, `frontend` and `generator` Docker images and loads them into the cluster with `kind load` |
+| `terraform/releases.tf` | Installs the `clickstack-operators` and `clickstack` charts (from the ClickStack repository) and the local `otel-collector`, `postgres`, `kafka`, `backend`, `worker`, `generator` and `frontend` charts in the `catnrat` namespace |
 | `terraform/clickstack-values.yaml.tftpl` | Values of the `clickstack` chart: resources, retention, standalone collector and the HyperDX NodePort |
 | `terraform/variables.tf` | Settings: cluster name, Kubernetes version (`node_image`), namespace, ports, event rate and telemetry retention |
 | `terraform/outputs.tf` | URLs, kubectl context and the deployed image tags |
@@ -64,7 +70,9 @@ telemetry_ttl     = "24h"
 | Chart | Description |
 |---|---|
 | `charts/postgres` | Single-instance PostgreSQL 14 (StatefulSet with a 1Gi volume, Service and password Secret) |
-| `charts/backend` | Go backend; applies the migrations on start and reads the password from the `postgres` Secret |
+| `charts/kafka` | Single Apache Kafka 4 broker in KRaft mode (StatefulSet with a 1Gi volume and Service); a post-install Job creates the topics listed in `values.yaml` |
+| `charts/backend` | Go backend; applies the migrations on start, reads the password from the `postgres` Secret and publishes to Kafka |
+| `charts/worker` | Go worker that consumes `purchases.stored` and updates `customer_stats`; deployed after the backend, whose migrations create the tables |
 | `charts/frontend` | React frontend served by nginx, which proxies `/api` to the backend |
 | `charts/generator` | Python generator; its environment variables come from `config` in `values.yaml` |
 | `charts/otel-collector` | OpenTelemetry Collector agent (DaemonSet) that collects pod logs, kubelet metrics and OTLP data and forwards them to ClickStack |
@@ -73,7 +81,9 @@ The charts can also be used without Terraform, as long as the images are already
 
 ```bash
 helm install postgres infra/charts/postgres -n catnrat --create-namespace --set password=secret
+helm install kafka infra/charts/kafka -n catnrat
 helm install backend infra/charts/backend -n catnrat --set image.tag=<tag>
+helm install worker infra/charts/worker -n catnrat --set image.tag=<tag>
 helm install generator infra/charts/generator -n catnrat --set image.tag=<tag>
 helm install frontend infra/charts/frontend -n catnrat --set image.tag=<tag>
 ```
@@ -94,8 +104,8 @@ pod logs, kubelet  -------->
 
 | Signal | Source |
 |---|---|
-| Traces | Backend and generator (OpenTelemetry SDK): HTTP requests, database queries and calls between them |
-| Metrics | Backend and generator (HTTP and event counters), kubelet (CPU, memory, network and disk of nodes, pods and containers) |
+| Traces | Backend, worker and generator (OpenTelemetry SDK): HTTP requests, database queries, calls between them and the Kafka messages |
+| Metrics | Backend, worker and generator (HTTP, event, outbox and Kafka consumer counters), kubelet (CPU, memory, network and disk of nodes, pods and containers) |
 | Logs | stdout/stderr of every pod in the cluster, with the severity parsed and, for the backend, the trace ID |
 
 The local `otel-collector` agent runs on the node, tags everything with its namespace, pod, deployment and node,
@@ -113,10 +123,12 @@ Traces and Metrics sources are already configured:
 
 - **Search**: logs and traces, filtered by service (`backend`, `generator`, `frontend`, `postgres`, ...),
   severity or any attribute. A backend log line opens its trace, and a span shows its logs.
-- **Services**: request rate, errors and latency of the backend and the generator, from the traces.
+- **Services**: request rate, errors and latency of the backend, the worker and the generator, from the traces.
+  A trace of `POST /events` continues into the worker through Kafka (`purchases.stored publish` → `process`).
 - **Kubernetes**: CPU and memory of the pods and the node, from the kubelet metrics.
 - **Chart Explorer** / **Dashboards**: charts of any metric, e.g. `catnrat.events.inserted` (attribute
-  `source`) or `generator.events.sent` (attribute `origin`).
+  `source`), `generator.events.sent` (attribute `origin`), `catnrat.stats.messages` (attribute `result`) or `catnrat.stats.consumer_lag`
+  (messages the worker has not processed yet, by `partition`).
 
 The tables (`otel_logs`, `otel_traces`, `otel_metrics_*` in the `default` database) can also be queried directly:
 

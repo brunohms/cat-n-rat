@@ -1,0 +1,37 @@
+image:
+  repository: apache/kafka
+  tag: "4.3.2"
+  pullPolicy: IfNotPresent
+
+# KRaft cluster ID (kafka-storage.sh random-uuid). The storage is formatted with it on the first start and must
+# keep the same ID afterwards
+clusterId: "Y8BFhJreR5yizW9tLhSj3A"
+
+# Topics created (if missing) after every install and upgrade. Topics are not auto-created by producers, so a
+# typo in a topic name fails instead of silently creating a new topic
+topics:
+  - name: purchases.stored
+    # Upper bound on the number of worker replicas that consume in parallel
+    partitions: 3
+
+# JVM heap of the broker; keep it well under the memory limit
+heapOpts: "-Xms256m -Xmx512m"
+
+storage:
+  size: 1Gi
+  # Empty uses the cluster default StorageClass (kind ships with "standard")
+  storageClassName: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+podSecurityContext:
+  # "appuser" of the official image; fsGroup lets it write to the volume
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000

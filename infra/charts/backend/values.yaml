@@ -25,6 +25,11 @@ otel:
   endpoint: ""
   serviceName: backend
 
+# Every new purchase is published to this topic (through the outbox table), for the worker
+kafka:
+  brokers: kafka:9092
+  topic: purchases.stored
+
 database:
   host: postgres
   port: 5432

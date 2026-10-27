@@ -7,13 +7,16 @@ Go backend that stores purchase events in PostgreSQL 14. Events arrive in two wa
 
 Events are stored idempotently: an `event_id` that is already in the database is ignored.
 
+Every purchase stored for the first time is also published to the `purchases.stored` Kafka topic, where the
+[worker](../worker/README.md) picks it up to update the customer stats (see [Kafka](#kafka)).
+
 ## Running
 
 From the repository root, using [mise](https://mise.jdx.dev) (see the [root README](../../README.md)):
 
 ```bash
-mise run backend:dev    # starts PostgreSQL 14 if needed and runs the backend on localhost:8001
-mise run dev:local      # same, plus the generator and the frontend
+mise run backend:dev    # starts PostgreSQL 14 and Kafka if needed and runs the backend on localhost:8001
+mise run dev:local      # same, plus the worker, the generator and the frontend
 ```
 
 The backend reads `DATABASE_URL` from `mise.toml`, which points to the database started by `mise run db:start`.
@@ -28,6 +31,8 @@ The backend reads `DATABASE_URL` from `mise.toml`, which points to the database 
 | `MAX_BATCH` | `10000` | Maximum number of events per request |
 | `RUN_MIGRATIONS` | `true` | Applies pending migrations when the server starts |
 | `PORT` | `8000` | API port (`mise run backend:dev` uses `BACKEND_PORT`, default `8001`) |
+| `KAFKA_BROKERS` | `localhost:9092` | Kafka bootstrap brokers, comma-separated |
+| `KAFKA_TOPIC` | `purchases.stored` | Topic of the message published for every new purchase |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP endpoint of the OpenTelemetry Collector; traces and metrics are only exported when it is set |
 | `OTEL_SERVICE_NAME` | `backend` | Service name of the traces and metrics |
 
@@ -43,6 +48,8 @@ variable is read by the SDK):
   (attribute `source`: `push` or `pull`).
 
 The request log lines include `trace_id` and `span_id`, which the collector uses to link each log to its trace.
+The trace continues through Kafka: the publish span and the worker spans join the trace of the request that
+stored the purchase. The counter `catnrat.outbox.published` counts the messages sent to Kafka.
 In the kind cluster everything ends up in ClickStack (see [`infra/`](../../infra/README.md#monitoring)).
 
 ## API
@@ -89,7 +96,8 @@ The list routes return one page plus the number of matching rows:
 | `limit`, `offset` | Page size (1-500, default 50) and offset |
 
 Each customer includes `purchase_count`, `total_spent` (sum of the totals of the purchases with status `paid`)
-and `last_purchase_at`.
+and `last_purchase_at`. They are read from the `customer_stats` table, which the worker updates from Kafka, so a
+purchase just stored shows up in them a moment later (usually well under a second).
 
 ```bash
 curl -X POST localhost:8001/events/fetch -H 'content-type: application/json' -d '{"count": 50}'
@@ -105,6 +113,7 @@ curl "localhost:8001/customers?state=SP&sort=total_spent&order=desc"
 | `internal/api` | HTTP routes and handlers |
 | `internal/purchase` | Event model, validation and database access |
 | `internal/generator` | HTTP client for the generator |
+| `internal/outbox` | Kafka producer and the relay that publishes the `outbox` table |
 | `internal/database` | Connection pool and migration runner |
 | `internal/config` | Settings loaded from environment variables |
 | `internal/telemetry` | OpenTelemetry tracer and meter providers |
@@ -117,6 +126,14 @@ Tables created by the initial migration:
 - `customers`: one row per customer, updated with the latest data received.
 - `purchases`: one row per event (`event_id` is the primary key), with totals, payment data, `source` (`push` or `pull`) and the original event in `payload` (JSONB).
 - `purchase_items`: the items of each purchase.
+
+Tables created by `000002_create_outbox_and_customer_stats`:
+
+- `outbox`: messages waiting to be published to Kafka (see [Kafka](#kafka)).
+- `customer_stats`: purchase count, total spent and last purchase of each customer, maintained by the worker.
+  The migration fills it from the purchases already stored.
+- `customer_stats_events`: the `event_id`s already counted in `customer_stats`, so a message delivered twice
+  is not counted twice.
 
 Money values are `NUMERIC(12,2)` and are never converted to floating point on the way in or out.
 
@@ -135,3 +152,23 @@ mise run db:version         # print the current schema version
 The same commands are available on the binary itself: `server migrate up | down [N] | version`.
 
 To add a migration, create the next pair of files, e.g. `000002_add_x.up.sql` and `000002_add_x.down.sql`.
+
+## Kafka
+
+For every new purchase the backend publishes a message to `KAFKA_TOPIC` (format in the
+[worker README](../worker/README.md#message)), keyed by `customer_id`. It uses a transactional outbox:
+
+1. `Save` inserts the message into the `outbox` table in the same transaction as the purchase, together with
+   the trace context of the request.
+2. A relay running inside the backend reads the oldest rows (`FOR UPDATE SKIP LOCKED`, so several replicas can
+   run it), sends them to Kafka, waits for the acknowledgement and deletes them.
+
+So a purchase is never stored without its message, and the API keeps working while Kafka is down: the messages
+wait in the outbox, the relay logs the failure and retries with backoff, and everything is sent once Kafka is
+back. A crash between the acknowledgement and the delete sends a message again, which the worker skips.
+
+```bash
+mise run kafka:consume                                                              # local
+mise run infra:kafka-consume                                                        # kind cluster
+docker exec catnrat-db psql -U catnrat -d catnrat -c "SELECT count(*) FROM outbox"  # messages not sent yet
+```

@@ -17,14 +17,20 @@ POSTGRES_PASSWORD = "catnrat"
 POSTGRES_DB = "catnrat"
 DATABASE_URL = "postgres://catnrat:catnrat@localhost:5432/catnrat?sslmode=disable"
 
+KAFKA_CONTAINER = "catnrat-kafka"
+KAFKA_IMAGE = "apache/kafka:4.3.2"
+KAFKA_BROKERS = "localhost:9092"
+KAFKA_TOPIC = "purchases.stored"
+
 # Local ports; override them (e.g. BACKEND_PORT=9001 mise run dev:local) if they are already in use
 BACKEND_PORT = "{{ get_env(name='BACKEND_PORT', default='8001') }}"
 GENERATOR_PORT = "{{ get_env(name='GENERATOR_PORT', default='8000') }}"
 FRONTEND_PORT = "{{ get_env(name='FRONTEND_PORT', default='5173') }}"
+WORKER_PORT = "{{ get_env(name='WORKER_PORT', default='8002') }}"
 
 [tasks.install]
-description = "Install the dependencies of the generator, the backend and the frontend"
-depends = ["generator:install", "backend:install", "frontend:install"]
+description = "Install the dependencies of the generator, the backend, the worker and the frontend"
+depends = ["generator:install", "backend:install", "worker:install", "frontend:install"]
 
 [tasks.dev]
 description = "Create the kind cluster with Terraform and deploy everything (frontend on localhost:30080, HyperDX on localhost:30030)"
@@ -32,13 +38,13 @@ depends = ["infra:up"]
 run = "kubectl --context kind-catnrat -n catnrat get pods,svc"
 
 [tasks."dev:local"]
-description = "Run the backend, the generator and the frontend from source (database in Docker)"
-depends = ["db:start"]
-run = "mise run backend:dev ::: generator:dev ::: frontend:dev"
+description = "Run the backend, the worker, the generator and the frontend from source (database and Kafka in Docker)"
+depends = ["db:start", "kafka:start"]
+run = "mise run backend:dev ::: worker:dev ::: generator:dev ::: frontend:dev"
 
 [tasks.test]
 description = "Run all tests"
-depends = ["generator:test", "backend:test", "frontend:test"]
+depends = ["generator:test", "backend:test", "worker:test", "frontend:test"]
 
 # --- Database (PostgreSQL 14 in Docker) ---
 
@@ -91,6 +97,38 @@ depends = ["db:start"]
 dir = "{{config_root}}/app/backend"
 run = "go run ./cmd/server migrate version"
 
+# --- Kafka (single KRaft broker in Docker) ---
+
+[tasks."kafka:start"]
+description = "Start Kafka in Docker on localhost:9092 and create the $KAFKA_TOPIC topic"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+if docker container inspect "$KAFKA_CONTAINER" >/dev/null 2>&1; then
+  docker start "$KAFKA_CONTAINER" >/dev/null
+else
+  # Without KAFKA_* variables the image runs a single combined broker and controller listening on 9092
+  docker run -d --name "$KAFKA_CONTAINER" -p 9092:9092 "$KAFKA_IMAGE" >/dev/null
+fi
+until docker exec "$KAFKA_CONTAINER" /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --if-not-exists --topic "$KAFKA_TOPIC" --partitions 3 --replication-factor 1 >/dev/null 2>&1; do
+  sleep 1
+done
+echo "Kafka is ready on localhost:9092 (topic $KAFKA_TOPIC)"
+"""
+
+[tasks."kafka:stop"]
+description = "Stop the Kafka container (messages are kept until it is removed)"
+run = "docker stop $KAFKA_CONTAINER"
+
+[tasks."kafka:reset"]
+description = "Delete the Kafka container and its messages"
+run = "docker rm -f $KAFKA_CONTAINER"
+
+[tasks."kafka:consume"]
+description = "Print the messages of the $KAFKA_TOPIC topic, from the beginning"
+run = "docker exec -it $KAFKA_CONTAINER /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic $KAFKA_TOPIC --from-beginning --property print.key=true"
+
 # --- Backend (Go) ---
 
 [tasks."backend:install"]
@@ -100,7 +138,7 @@ run = "go mod download"
 
 [tasks."backend:dev"]
 description = "Run the backend on localhost:$BACKEND_PORT (applies pending migrations on start)"
-depends = ["db:start"]
+depends = ["db:start", "kafka:start"]
 dir = "{{config_root}}/app/backend"
 run = "PORT=$BACKEND_PORT GENERATOR_URL=http://localhost:$GENERATOR_PORT go run ./cmd/server"
 
@@ -122,6 +160,38 @@ run = "CGO_ENABLED=0 go build -trimpath -o bin/server ./cmd/server"
 [tasks."backend:image"]
 description = "Build the backend Docker image"
 run = "docker build -t catnrat-backend app/backend"
+
+# --- Worker (Go) ---
+
+[tasks."worker:install"]
+description = "Download the Go modules of the worker"
+dir = "{{config_root}}/app/worker"
+run = "go mod download"
+
+[tasks."worker:dev"]
+description = "Run the worker, consuming $KAFKA_TOPIC and updating customer_stats (health check on localhost:$WORKER_PORT)"
+depends = ["db:start", "kafka:start"]
+dir = "{{config_root}}/app/worker"
+run = "PORT=$WORKER_PORT go run ./cmd/worker"
+
+[tasks."worker:lint"]
+description = "Check formatting and run go vet on the worker"
+dir = "{{config_root}}/app/worker"
+run = ['test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }', "go vet ./..."]
+
+[tasks."worker:test"]
+description = "Run the worker tests"
+dir = "{{config_root}}/app/worker"
+run = "go test ./..."
+
+[tasks."worker:build"]
+description = "Build the worker binary into app/worker/bin/worker"
+dir = "{{config_root}}/app/worker"
+run = "CGO_ENABLED=0 go build -trimpath -o bin/worker ./cmd/worker"
+
+[tasks."worker:image"]
+description = "Build the worker Docker image"
+run = "docker build -t catnrat-worker app/worker"
 
 # --- Frontend (React) ---
 
@@ -190,7 +260,7 @@ dir = "{{config_root}}/infra/terraform"
 run = "terraform plan"
 
 [tasks."infra:up"]
-description = "Create the kind cluster, build and load the images, and deploy the app and the monitoring stack with Helm"
+description = "Create the kind cluster, build and load the images, and deploy the app, Kafka and the monitoring stack with Helm"
 depends = ["infra:init"]
 dir = "{{config_root}}/infra/terraform"
 run = "terraform apply -auto-approve"
@@ -200,6 +270,10 @@ description = "Destroy the kind cluster and everything in it"
 depends = ["infra:init"]
 dir = "{{config_root}}/infra/terraform"
 run = "terraform destroy -auto-approve"
+
+[tasks."infra:kafka-consume"]
+description = "Print the messages of the purchases.stored topic in the cluster, from the beginning"
+run = "kubectl --context kind-catnrat -n catnrat exec -it kafka-0 -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic purchases.stored --from-beginning --property print.key=true"
 
 [tasks."infra:status"]
 description = "Show the pods and services of the cluster"
@@ -212,7 +286,7 @@ dir = "{{config_root}}/infra"
 run = [
   "terraform -chdir=terraform fmt -check -recursive",
   "terraform -chdir=terraform validate",
-  "helm lint charts/backend charts/generator charts/frontend charts/otel-collector",
+  "helm lint charts/backend charts/worker charts/generator charts/frontend charts/kafka charts/otel-collector",
   "helm lint charts/postgres --set password=lint",
 ]
 

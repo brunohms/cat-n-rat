@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const (
@@ -91,13 +93,16 @@ type Page[T any] struct {
 
 type Store struct {
 	pool *pgxpool.Pool
+	// Kafka topic of the StoredMessage of each new purchase
+	topic string
 }
 
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func NewStore(pool *pgxpool.Pool, topic string) *Store {
+	return &Store{pool: pool, topic: topic}
 }
 
 // Save stores purchase events idempotently: events whose event_id already exists are skipped.
+// Each new purchase also gets a StoredMessage in the outbox, in the same transaction.
 func (s *Store) Save(ctx context.Context, events []Event, source string) (IngestResult, error) {
 	result := IngestResult{Received: len(events)}
 	if len(events) == 0 {
@@ -118,6 +123,9 @@ func (s *Store) Save(ctx context.Context, events []Event, source string) (Ingest
 		return result, err
 	}
 	if err := insertItems(ctx, tx, events, inserted); err != nil {
+		return result, err
+	}
+	if err := s.insertOutbox(ctx, tx, events, inserted); err != nil {
 		return result, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -280,6 +288,46 @@ func insertItems(ctx context.Context, tx pgx.Tx, events []Event, inserted map[uu
 		eventIDs, skus, names, categories, unitPrices, quantities, subtotals)
 	if err != nil {
 		return fmt.Errorf("insert purchase items: %w", err)
+	}
+	return nil
+}
+
+// insertOutbox queues a StoredMessage for each inserted event, in the request order.
+func (s *Store) insertOutbox(ctx context.Context, tx pgx.Tx, events []Event, inserted map[uuid.UUID]Event) error {
+	// The trace context of the current request, so the publish and the worker spans join its trace
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	headers, err := json.Marshal(carrier)
+	if err != nil {
+		return fmt.Errorf("encode outbox headers: %w", err)
+	}
+
+	var keys, payloads []string
+	done := map[uuid.UUID]bool{}
+	for _, e := range events {
+		if _, ok := inserted[e.EventID]; !ok || done[e.EventID] {
+			continue
+		}
+		done[e.EventID] = true
+		payload, err := json.Marshal(newStoredMessage(e))
+		if err != nil {
+			return fmt.Errorf("encode outbox message: %w", err)
+		}
+		keys = append(keys, e.Customer.CustomerID)
+		payloads = append(payloads, string(payload))
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO outbox (topic, message_key, payload, headers)
+		SELECT $1, t.message_key, t.payload::jsonb, $4::jsonb
+		FROM unnest($2::text[], $3::text[]) WITH ORDINALITY AS t(message_key, payload, position)
+		ORDER BY t.position`,
+		s.topic, keys, payloads, string(headers))
+	if err != nil {
+		return fmt.Errorf("insert outbox messages: %w", err)
 	}
 	return nil
 }
